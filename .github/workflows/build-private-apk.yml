@@ -96,14 +96,19 @@ jobs:
           cache: gradle
           cache-dependency-path: source/gradle/wrapper/gradle-wrapper.properties
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
-          export PATH="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:$PATH"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER=$(find "$SDK_ROOT/cmdline-tools" -maxdepth 3 -type f -name sdkmanager 2>/dev/null | sort -V | tail -1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found under $SDK_ROOT/cmdline-tools"
+            exit 1
+          fi
+          export PATH="$(dirname "$SDKMANAGER"):$PATH"
+          echo "sdkmanager=$SDKMANAGER" >> "$GITHUB_STEP_SUMMARY"
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
           SDK_PACKAGES="platforms;android-${{ steps.detect.outputs.compile_sdk }} build-tools;${{ steps.detect.outputs.compile_sdk }}.0.0"
           if [ -n "${{ steps.detect.outputs.ndk_version }}" ]; then
             SDK_PACKAGES="$SDK_PACKAGES ndk;${{ steps.detect.outputs.ndk_version }}"
