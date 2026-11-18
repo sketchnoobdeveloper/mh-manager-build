@@ -96,10 +96,14 @@ jobs:
           cache: gradle
           cache-dependency-path: source/gradle/wrapper/gradle-wrapper.properties
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Install Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
+          export PATH="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:$PATH"
           SDK_PACKAGES="platforms;android-${{ steps.detect.outputs.compile_sdk }} build-tools;${{ steps.detect.outputs.compile_sdk }}.0.0"
           if [ -n "${{ steps.detect.outputs.ndk_version }}" ]; then
             SDK_PACKAGES="$SDK_PACKAGES ndk;${{ steps.detect.outputs.ndk_version }}"
