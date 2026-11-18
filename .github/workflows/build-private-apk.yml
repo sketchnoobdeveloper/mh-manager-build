@@ -1,0 +1,157 @@
+name: Build MH Manager (private source)
+
+# This workflow lives in a PUBLIC repository and contains NO application
+# source code. It checks out the private source repository with a short-lived,
+# read-only token supplied as a repository secret, builds the debug APK on a
+# public runner, and uploads only the APK as an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Branch, tag or commit in the private source repository'
+        required: false
+        default: 'main'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: sketchnoobdeveloper/MH-Manager
+  SOURCE_DIR: source
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Validate secret
+        shell: bash
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          if [ -z "${PRIVATE_REPO_TOKEN}" ]; then
+            echo "::error::PRIVATE_REPO_TOKEN secret is missing"
+            exit 1
+          fi
+
+      - name: Checkout private source (read-only token)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.source_ref || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: ${{ env.SOURCE_DIR }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Discover build requirements from the source
+        id: detect
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+
+          JAVA_VERSION=$(grep -rhoE 'JavaVersion\.VERSION_[0-9]+|jvmTarget[[:space:]]*=[[:space:]]*"[0-9]+"' \
+            --include='*.gradle.kts' --include='*.gradle' . \
+            | grep -oE '[0-9]+' | sort -n | tail -1 || true)
+          JAVA_VERSION=${JAVA_VERSION:-17}
+
+          COMPILE_SDK=$(grep -rhoE 'compileSdk[[:space:]]*=[[:space:]]*[0-9]+' \
+            --include='*.gradle.kts' --include='*.gradle' . \
+            | grep -oE '[0-9]+' | sort -n | tail -1 || true)
+          COMPILE_SDK=${COMPILE_SDK:-35}
+
+          NDK_VERSION=$(grep -rhoE 'ndkVersion[[:space:]]*=[[:space:]]*"[0-9.]+"' \
+            --include='*.gradle.kts' --include='*.gradle' . \
+            | grep -oE '[0-9][0-9.]*' | sort -u | head -1 || true)
+
+          CMAKE_VERSION=$(grep -rhA4 'externalNativeBuild' \
+            --include='*.gradle.kts' --include='*.gradle' . 2>/dev/null \
+            | grep -oE 'version[[:space:]]*=[[:space:]]*"[0-9.]+"' \
+            | grep -oE '[0-9][0-9.]*' | head -1 || true)
+          CMAKE_VERSION=${CMAKE_VERSION:-3.22.1}
+
+          echo "java_version=${JAVA_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "compile_sdk=${COMPILE_SDK}" >> "$GITHUB_OUTPUT"
+          echo "ndk_version=${NDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "cmake_version=${CMAKE_VERSION}" >> "$GITHUB_OUTPUT"
+
+          echo "### Discovered build requirements" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Java: ${JAVA_VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Gradle: $(grep -oE 'gradle-[0-9.]+' gradle/wrapper/gradle-wrapper.properties | head -1)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- compileSdk: ${COMPILE_SDK}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- NDK: ${NDK_VERSION:-not required}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- CMake: ${CMAKE_VERSION}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up JDK ${{ steps.detect.outputs.java_version }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ steps.detect.outputs.java_version }}
+          cache: gradle
+          cache-dependency-path: source/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_PACKAGES="platforms;android-${{ steps.detect.outputs.compile_sdk }} build-tools;${{ steps.detect.outputs.compile_sdk }}.0.0"
+          if [ -n "${{ steps.detect.outputs.ndk_version }}" ]; then
+            SDK_PACKAGES="$SDK_PACKAGES ndk;${{ steps.detect.outputs.ndk_version }}"
+          fi
+          if [ -n "${{ steps.detect.outputs.cmake_version }}" ]; then
+            SDK_PACKAGES="$SDK_PACKAGES cmake;${{ steps.detect.outputs.cmake_version }}"
+          fi
+          while read -r package; do
+            yes | sdkmanager --licenses >/dev/null 2>&1 || true
+            sdkmanager --install "$package"
+          done <<< "$(tr ' ' '\n' <<< "$SDK_PACKAGES")"
+
+      - name: Prepare local-only build settings
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          # The source carries an aarch64-only aapt2 shim path for local device
+          # builds. GitHub's x86_64 runners must use AGP's bundled aapt2.
+          sed -i '/^android\.aapt2FromMavenOverride=/d' gradle.properties || true
+          chmod +x gradlew
+
+      - name: Build debug APK
+        shell: bash
+        working-directory: source
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8"
+            -Dorg.gradle.workers.max=2
+            -Dorg.gradle.parallel=false
+        run: |
+          ./gradlew :app:assembleDebug --no-daemon --max-workers=2 --stacktrace \
+            -Pkotlin.compiler.execution.strategy=in-process
+
+      - name: Verify APK
+        id: apk
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          APK=$(find app/build/outputs/apk/debug -name '*.apk' -type f | head -1)
+          if [ -z "$APK" ]; then
+            echo "::error::No APK produced"
+            exit 1
+          fi
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          echo "APK: $(basename "$APK") ($(du -h "$APK" | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mh-manager-debug
+          path: source/${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
