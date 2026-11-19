@@ -60,6 +60,8 @@ jobs:
             --include='*.gradle.kts' --include='*.gradle' . \
             | grep -oE '[0-9]+' | sort -n | tail -1 || true)
           JAVA_VERSION=${JAVA_VERSION:-17}
+          # LSPatch engine jars are Java 21 bytecode (major 65).
+          JAVA_VERSION=21
 
           COMPILE_SDK=$(grep -rhoE 'compileSdk[[:space:]]*=[[:space:]]*[0-9]+' \
             --include='*.gradle.kts' --include='*.gradle' . \
