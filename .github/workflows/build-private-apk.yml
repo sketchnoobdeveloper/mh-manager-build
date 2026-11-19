@@ -140,7 +140,7 @@ jobs:
             -Dorg.gradle.workers.max=2
             -Dorg.gradle.parallel=false
         run: |
-          ./gradlew :app:assembleDebug :mh-toolbox:assembleDebug --no-daemon --max-workers=2 --stacktrace \
+          ./gradlew :app:assembleDebug :mh-toolbox:assembleDebug :mh-toolbox-plugin:assembleDebug --no-daemon --max-workers=2 --stacktrace \
             -Pkotlin.compiler.execution.strategy=in-process
 
       - name: Verify APK
@@ -163,12 +163,26 @@ jobs:
           fi
           echo "toolbox=$TOOLBOX" >> "$GITHUB_OUTPUT"
           echo "ToolBox: $(basename "$TOOLBOX") ($(du -h "$TOOLBOX" | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+          TOOLBOX_PLUGIN=$(find mh-toolbox-plugin/build/outputs/apk/debug -name '*.apk' -type f | head -1)
+          if [ -z "$TOOLBOX_PLUGIN" ]; then
+            echo "::error::No MH ToolBox plugin APK produced"
+            exit 1
+          fi
+          echo "toolbox_plugin=$TOOLBOX_PLUGIN" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: mh-manager-debug
           path: source/${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload MH ToolBox plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mh-toolbox-plugin-debug
+          path: source/${{ steps.apk.outputs.toolbox_plugin }}
           if-no-files-found: error
           retention-days: 14
 
